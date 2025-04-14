@@ -31,31 +31,84 @@ def compare_excel(df_data, df_lookup, data_columns, lookup_columns):
         results_data = []
         results_lookup = []
         
+        # 创建数据副本以避免修改原始数据
+        df_data = df_data.copy()
+        df_lookup = df_lookup.copy()
+        
         for col_data, col_lookup in zip(data_columns, lookup_columns):
+            # 处理空值并转换为字符串
+            df_data[col_data] = df_data[col_data].fillna('').astype(str).str.strip()
+            df_lookup[col_lookup] = df_lookup[col_lookup].fillna('').astype(str).str.strip()
+            
             # 将数据和查找值转为集合
-            data_values = set(df_data[col_data].astype(str).dropna().values)
-            lookup_values = set(df_lookup[col_lookup].astype(str).dropna().values)
+            data_values = set(df_data[col_data].values)
+            lookup_values = set(df_lookup[col_lookup].values)
             
             # 在数据表中标记结果
-            df_data[f"{col_data}_匹配结果"] = df_data[col_data].astype(str).apply(
-                lambda x: "匹配" if pd.notna(x) and x in lookup_values else ("缺失" if pd.isna(x) else "未匹配")
+            df_data[f"{col_data}_匹配结果"] = df_data[col_data].apply(
+                lambda x: "匹配" if x in lookup_values else ("缺失" if x == '' else "未匹配")
             )
             
             # 在查找值表中标记结果
-            df_lookup[f"{col_lookup}_匹配结果"] = df_lookup[col_lookup].astype(str).apply(
-                lambda x: "匹配" if pd.notna(x) and x in data_values else ("缺失" if pd.isna(x) else "未匹配")
+            df_lookup[f"{col_lookup}_匹配结果"] = df_lookup[col_lookup].apply(
+                lambda x: "匹配" if x in data_values else ("缺失" if x == '' else "未匹配")
             )
             
             # 统计结果
-            results_data.append(df_data[f"{col_data}_匹配结果"].value_counts().style.applymap(
-                lambda x: 'color: red' if x == '未匹配' else 'color: black'))
-            results_lookup.append(df_lookup[f"{col_lookup}_匹配结果"].value_counts().style.applymap(
-                lambda x: 'color: red' if x == '未匹配' else 'color: black'))
+            results_data.append(df_data[f"{col_data}_匹配结果"].value_counts())
+            results_lookup.append(df_lookup[f"{col_lookup}_匹配结果"].value_counts())
         
         return df_data, df_lookup, results_data, results_lookup
     except Exception as e:
         st.error(f"比对数据时发生错误: {str(e)}")
         return None, None, None, None
+
+def apply_excel_styles(writer, df, sheet_name, columns_to_check):
+    """应用Excel样式"""
+    try:
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+        
+        # 定义样式
+        red_format = workbook.add_format({
+            'font_color': 'red',
+            'font_name': '微软雅黑',
+            'align': 'left',
+            'valign': 'vcenter'
+        })
+        
+        normal_format = workbook.add_format({
+            'font_name': '微软雅黑',
+            'align': 'left',
+            'valign': 'vcenter'
+        })
+        
+        # 设置列宽
+        for idx, col in enumerate(df.columns):
+            max_length = max(
+                df[col].astype(str).apply(len).max(),
+                len(str(col))
+            )
+            worksheet.set_column(idx, idx, max_length + 2)
+        
+        # 获取列的索引位置并应用样式
+        for col_name in columns_to_check:
+            if col_name in df.columns:  # 确保列存在
+                col_idx = df.columns.get_loc(col_name)
+                result_col = f"{col_name}_匹配结果"
+                
+                if result_col in df.columns:  # 确保结果列存在
+                    # 为每一行应用条件格式
+                    for row_idx in range(len(df)):
+                        cell_value = str(df.iloc[row_idx][col_name])
+                        match_result = df.iloc[row_idx][result_col]
+                        
+                        if match_result == "未匹配":
+                            worksheet.write(row_idx + 1, col_idx, cell_value, red_format)
+                        else:
+                            worksheet.write(row_idx + 1, col_idx, cell_value, normal_format)
+    except Exception as e:
+        st.error(f"应用Excel样式时发生错误: {str(e)}")
 
 def main():
     st.set_page_config(page_title="Excel工具", page_icon="📊", layout="wide")
@@ -164,16 +217,24 @@ def main():
                         
                         # 下载结果
                         output = BytesIO()
-                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                            result_data.to_excel(writer, sheet_name='数据表对比结果', index=False)
-                            result_lookup.to_excel(writer, sheet_name='查找值表对比结果', index=False)
-                        
-                        st.download_button(
-                            label="下载比对结果",
-                            data=output.getvalue(),
-                            file_name=f"对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                        try:
+                            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                                # 写入数据
+                                result_data.to_excel(writer, sheet_name='数据表对比结果', index=False)
+                                result_lookup.to_excel(writer, sheet_name='查找值表对比结果', index=False)
+                                
+                                # 应用样式
+                                apply_excel_styles(writer, result_data, '数据表对比结果', data_columns)
+                                apply_excel_styles(writer, result_lookup, '查找值表对比结果', lookup_columns)
+                            
+                            st.download_button(
+                                label="下载比对结果",
+                                data=output.getvalue(),
+                                file_name=f"对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            st.error(f"生成Excel文件时发生错误: {str(e)}")
 
     elif function == "表格数据填充":
         st.header("表格数据填充")
