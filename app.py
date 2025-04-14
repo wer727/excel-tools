@@ -47,8 +47,10 @@ def compare_excel(df_data, df_lookup, data_columns, lookup_columns):
             )
             
             # 统计结果
-            results_data.append(df_data[f"{col_data}_匹配结果"].value_counts())
-            results_lookup.append(df_lookup[f"{col_lookup}_匹配结果"].value_counts())
+            results_data.append(df_data[f"{col_data}_匹配结果"].value_counts().style.applymap(
+                lambda x: 'color: red' if x == '未匹配' else 'color: black'))
+            results_lookup.append(df_lookup[f"{col_lookup}_匹配结果"].value_counts().style.applymap(
+                lambda x: 'color: red' if x == '未匹配' else 'color: black'))
         
         return df_data, df_lookup, results_data, results_lookup
     except Exception as e:
