@@ -252,11 +252,23 @@ def display_stats_cards(stats):
         )
 
 def main():
+    # 初始化session state
+    if 'comparison_results' not in st.session_state:
+        st.session_state.comparison_results = None
+    if 'comparison_stats' not in st.session_state:
+        st.session_state.comparison_stats = None
+    if 'excel_data' not in st.session_state:
+        st.session_state.excel_data = None
+    if 'result_timestamp' not in st.session_state:
+        st.session_state.result_timestamp = None
+    if 'show_comparison_section' not in st.session_state:
+        st.session_state.show_comparison_section = True
+    
     # 页面标题
     st.title("🔍 精确数据比对工具")
     st.markdown("---")
     
-    # 侧边栏说明
+    # 侧边栏说明和控制
     with st.sidebar:
         st.header("📖 使用说明")
         st.markdown("""
@@ -278,6 +290,39 @@ def main():
         - 最大文件大小：200MB
         - 编码支持：UTF-8、GBK
         """)
+        
+        # 控制按钮
+        st.markdown("---")
+        st.header("🎛️ 操作控制")
+        
+        if st.button("🔄 重新开始", use_container_width=True):
+            # 清除所有session state
+            for key in ['comparison_results', 'comparison_stats', 'excel_data', 'result_timestamp']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.session_state.show_comparison_section = True
+            st.rerun()
+        
+        # 显示结果状态
+        if st.session_state.comparison_results is not None:
+            st.success("✅ 有可用的比对结果")
+            if st.session_state.result_timestamp:
+                st.info(f"⏰ 生成时间: {st.session_state.result_timestamp}")
+            
+            if st.button("📋 查看结果详情", use_container_width=True):
+                st.session_state.show_comparison_section = False
+                st.rerun()
+            
+            if st.button("📁 跳转到下载", use_container_width=True):
+                st.session_state.show_comparison_section = False
+                # 滚动到页面底部的下载按钮
+                st.markdown('<script>window.scrollTo(0, document.body.scrollHeight);</script>', unsafe_allow_html=True)
+                st.rerun()
+    
+    # 如果有结果且不显示比对区域，直接跳到结果展示
+    if st.session_state.comparison_results is not None and not st.session_state.show_comparison_section:
+        show_results_section()
+        return
     
     # 文件上传区域
     st.subheader("📁 文件上传")
@@ -355,6 +400,7 @@ def main():
                     st.error(f"❌ 列数量不匹配！数据表选择了{len(data_columns)}列，查找表选择了{len(lookup_columns)}列")
 
             # 比对按钮和结果
+            st.markdown("---")
             if st.button("🚀 开始精确比对", type="primary", use_container_width=True):
                 if len(data_columns) != len(lookup_columns):
                     st.error("❌ 两个表格选择的列数必须相同！")
@@ -371,67 +417,129 @@ def main():
                     if result_data is not None:
                         processing_time = time.time() - start_time
                         
-                        st.success(f"✅ 比对完成！处理时间: {processing_time:.2f}秒")
+                        # 保存结果到session state
+                        st.session_state.comparison_results = {
+                            'result_data': result_data,
+                            'result_lookup': result_lookup,
+                            'df_data': df_data,
+                            'df_lookup': df_lookup,
+                            'data_columns': data_columns,
+                            'lookup_columns': lookup_columns
+                        }
+                        st.session_state.comparison_stats = stats
+                        st.session_state.result_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         
-                        # 显示统计结果
-                        st.markdown("---")
-                        st.subheader("📈 比对结果统计")
-                        display_stats_cards(stats)
-                        
-                        # 详细统计表
-                        st.markdown("##### 详细统计")
-                        stats_df = pd.DataFrame([
-                            {"项目": k, "数量": v, "占比": f"{v/stats['查找表总行数']*100:.2f}%" if '行数' in k and stats['查找表总行数'] > 0 else "-"}
-                            for k, v in stats.items()
-                        ])
-                        st.dataframe(stats_df, use_container_width=True)
-                        
-                        # 显示结果预览
-                        st.markdown("---")
-                        st.subheader("🔍 结果预览")
-                        
-                        tab1, tab2 = st.tabs(["📋 查找表结果", "📊 数据表结果"])
-                        
-                        with tab1:
-                            st.markdown("显示查找表的匹配结果（前100行）")
-                            display_cols = ['匹配状态', '匹配行号', '匹配详情'] + list(df_lookup.columns)
-                            st.dataframe(
-                                result_lookup[display_cols].head(100), 
-                                use_container_width=True
-                            )
-                        
-                        with tab2:
-                            st.markdown("显示数据表的被匹配状态（前100行）")
-                            display_cols = list(df_data.columns) + ['被匹配状态', '被匹配次数']
-                            st.dataframe(
-                                result_data[display_cols].head(100), 
-                                use_container_width=True
-                            )
-                        
-                        # 生成Excel下载
-                        st.markdown("---")
-                        st.subheader("📥 下载结果")
-                        
+                        # 生成Excel并保存到session state
                         with st.spinner("正在生成Excel文件..."):
                             excel_data = create_styled_excel(result_data, result_lookup, data_columns, lookup_columns)
+                            st.session_state.excel_data = excel_data
                         
-                        if excel_data:
-                            st.download_button(
-                                label="📥 下载详细比对结果 (Excel)",
-                                data=excel_data,
-                                file_name=f"精确比对结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                type="primary",
-                                use_container_width=True
-                            )
-                            
-                            st.info("""
-                            📋 **Excel文件说明：**
-                            - 🟢 绿色：匹配成功的行
-                            - 🟡 黄色：重复匹配的行  
-                            - 🔴 红色：未匹配的行
-                            - 包含两个工作表：查找表结果 和 数据表结果
-                            """)
+                        st.success(f"✅ 比对完成！处理时间: {processing_time:.2f}秒")
+                        st.info("💡 结果已保存，您可以随时查看和下载，页面刷新不会丢失！")
+                        
+                        # 自动跳转到结果展示
+                        st.session_state.show_comparison_section = False
+                        time.sleep(1)  # 给用户一点时间看到成功消息
+                        st.rerun()
+
+    # 如果有保存的结果，显示结果区域
+    if st.session_state.comparison_results is not None:
+        show_results_section()
+
+def show_results_section():
+    """显示结果区域"""
+    if st.session_state.comparison_results is None:
+        return
+    
+    results = st.session_state.comparison_results
+    stats = st.session_state.comparison_stats
+    
+    result_data = results['result_data']
+    result_lookup = results['result_lookup']
+    df_data = results['df_data']
+    df_lookup = results['df_lookup']
+    
+    st.markdown("---")
+    st.header("📈 比对结果")
+    
+    if st.session_state.result_timestamp:
+        st.caption(f"⏰ 生成时间: {st.session_state.result_timestamp}")
+    
+    # 显示统计结果
+    st.subheader("📊 统计概览")
+    display_stats_cards(stats)
+    
+    # 详细统计表
+    with st.expander("📋 查看详细统计", expanded=False):
+        stats_df = pd.DataFrame([
+            {"项目": k, "数量": v, "占比": f"{v/stats['查找表总行数']*100:.2f}%" if '行数' in k and stats['查找表总行数'] > 0 else "-"}
+            for k, v in stats.items()
+        ])
+        st.dataframe(stats_df, use_container_width=True)
+    
+    # 显示结果预览
+    st.subheader("🔍 结果预览")
+    
+    tab1, tab2 = st.tabs(["📋 查找表结果", "📊 数据表结果"])
+    
+    with tab1:
+        st.markdown("显示查找表的匹配结果（前100行）")
+        display_cols = ['匹配状态', '匹配行号', '匹配详情'] + list(df_lookup.columns)
+        st.dataframe(
+            result_lookup[display_cols].head(100), 
+            use_container_width=True
+        )
+    
+    with tab2:
+        st.markdown("显示数据表的被匹配状态（前100行）")
+        display_cols = list(df_data.columns) + ['被匹配状态', '被匹配次数']
+        st.dataframe(
+            result_data[display_cols].head(100), 
+            use_container_width=True
+        )
+    
+    # 下载区域
+    st.markdown("---")
+    st.subheader("📥 下载完整结果")
+    
+    # 创建两列布局
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        if st.session_state.excel_data:
+            st.download_button(
+                label="📥 下载详细比对结果 (Excel)",
+                data=st.session_state.excel_data,
+                file_name=f"精确比对结果_{st.session_state.result_timestamp.replace(':', '-').replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
+        else:
+            if st.button("🔄 重新生成Excel文件", use_container_width=True):
+                with st.spinner("正在生成Excel文件..."):
+                    excel_data = create_styled_excel(
+                        result_data, result_lookup, 
+                        results['data_columns'], results['lookup_columns']
+                    )
+                    st.session_state.excel_data = excel_data
+                st.rerun()
+    
+    with col2:
+        st.info("""
+        📋 **Excel文件说明：**
+        - 🟢 绿色：匹配成功
+        - 🟡 黄色：重复匹配  
+        - 🔴 红色：未匹配
+        """)
+    
+    # 下载状态提示
+    st.success("✅ 点击下载按钮不会刷新页面，结果已保存！")
+    
+    # 返回比对区域的按钮
+    if st.button("🔄 进行新的比对", use_container_width=True):
+        st.session_state.show_comparison_section = True
+        st.rerun()
     
     # 底部信息
     st.markdown("---")
