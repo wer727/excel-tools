@@ -167,20 +167,24 @@ def precise_row_comparison(df_data, df_lookup, data_columns, lookup_columns):
         st.error(f"❌ 比对数据时发生错误: {str(e)}")
         return None, None, None
 
-def create_styled_excel(df_data_result, df_lookup_result, data_columns, lookup_columns):
+def create_styled_excel(df_data_result, df_lookup_result, data_columns, lookup_columns, data_filename="数据表", lookup_filename="查找表"):
     """创建带样式的Excel文件"""
     output = BytesIO()
     
     try:
+        # 处理工作表名称，移除文件扩展名
+        data_sheet_name = f"{data_filename.split('.')[0]}_结果"[:31]  # Excel工作表名称限制31字符
+        lookup_sheet_name = f"{lookup_filename.split('.')[0]}_结果"[:31]
+        
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            # 写入数据
-            df_data_result.to_excel(writer, sheet_name='数据表结果', index=False)
-            df_lookup_result.to_excel(writer, sheet_name='查找表结果', index=False)
+            # 写入数据，使用文件名作为工作表名
+            df_data_result.to_excel(writer, sheet_name=data_sheet_name, index=False)
+            df_lookup_result.to_excel(writer, sheet_name=lookup_sheet_name, index=False)
             
             # 获取工作簿和工作表对象
             workbook = writer.book
-            worksheet_data = writer.sheets['数据表结果']
-            worksheet_lookup = writer.sheets['查找表结果']
+            worksheet_data = writer.sheets[data_sheet_name]
+            worksheet_lookup = writer.sheets[lookup_sheet_name]
             
             # 定义格式
             red_format = workbook.add_format({'bg_color': '#FFE6E6', 'font_color': '#CC0000'})
@@ -263,6 +267,8 @@ def main():
         st.session_state.result_timestamp = None
     if 'show_comparison_section' not in st.session_state:
         st.session_state.show_comparison_section = True
+    if 'file_names' not in st.session_state:
+        st.session_state.file_names = {'data_file': '', 'lookup_file': ''}
     
     # 页面标题
     st.title("🔍 精确数据比对工具")
@@ -297,10 +303,11 @@ def main():
         
         if st.button("🔄 重新开始", use_container_width=True):
             # 清除所有session state
-            for key in ['comparison_results', 'comparison_stats', 'excel_data', 'result_timestamp']:
+            for key in ['comparison_results', 'comparison_stats', 'excel_data', 'result_timestamp', 'file_names']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.session_state.show_comparison_section = True
+            st.session_state.file_names = {'data_file': '', 'lookup_file': ''}
             st.rerun()
         
         # 显示结果状态
@@ -308,6 +315,12 @@ def main():
             st.success("✅ 有可用的比对结果")
             if st.session_state.result_timestamp:
                 st.info(f"⏰ 生成时间: {st.session_state.result_timestamp}")
+            
+            # 显示文件名
+            if st.session_state.file_names['data_file'] and st.session_state.file_names['lookup_file']:
+                st.markdown("📁 **文件信息:**")
+                st.markdown(f"- 数据表: `{st.session_state.file_names['data_file']}`")
+                st.markdown(f"- 查找表: `{st.session_state.file_names['lookup_file']}`")
             
             if st.button("📋 查看结果详情", use_container_width=True):
                 st.session_state.show_comparison_section = False
@@ -348,6 +361,10 @@ def main():
         )
 
     if uploaded_file_data and uploaded_file_lookup:
+        # 保存文件名到session state
+        st.session_state.file_names['data_file'] = uploaded_file_data.name
+        st.session_state.file_names['lookup_file'] = uploaded_file_lookup.name
+        
         # 读取文件
         with st.spinner("正在读取文件..."):
             df_data = process_file(uploaded_file_data)
@@ -360,11 +377,11 @@ def main():
             
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown(f"**数据表预览** (共{len(df_data):,}行)")
+                st.markdown(f"**📊 {st.session_state.file_names['data_file']}** (共{len(df_data):,}行)")
                 st.dataframe(df_data.head(), use_container_width=True)
                 
             with col2:
-                st.markdown(f"**查找表预览** (共{len(df_lookup):,}行)")
+                st.markdown(f"**🔎 {st.session_state.file_names['lookup_file']}** (共{len(df_lookup):,}行)")
                 st.dataframe(df_lookup.head(), use_container_width=True)
 
             # 列选择区域
@@ -373,7 +390,7 @@ def main():
             
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("##### 数据表的列")
+                st.markdown(f"##### 📊 {st.session_state.file_names['data_file']} - 选择列")
                 data_columns = st.multiselect(
                     "选择数据表中用于匹配的列", 
                     df_data.columns,
@@ -381,7 +398,7 @@ def main():
                 )
                 
             with col2:
-                st.markdown("##### 查找表的列")
+                st.markdown(f"##### 🔎 {st.session_state.file_names['lookup_file']} - 选择列")
                 lookup_columns = st.multiselect(
                     "选择查找表的查找条件列", 
                     df_lookup.columns,
@@ -424,14 +441,19 @@ def main():
                             'df_data': df_data,
                             'df_lookup': df_lookup,
                             'data_columns': data_columns,
-                            'lookup_columns': lookup_columns
+                            'lookup_columns': lookup_columns,
+                            'data_filename': st.session_state.file_names['data_file'],
+                            'lookup_filename': st.session_state.file_names['lookup_file']
                         }
                         st.session_state.comparison_stats = stats
                         st.session_state.result_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         
                         # 生成Excel并保存到session state
                         with st.spinner("正在生成Excel文件..."):
-                            excel_data = create_styled_excel(result_data, result_lookup, data_columns, lookup_columns)
+                            excel_data = create_styled_excel(
+                                result_data, result_lookup, data_columns, lookup_columns,
+                                st.session_state.file_names['data_file'], st.session_state.file_names['lookup_file']
+                            )
                             st.session_state.excel_data = excel_data
                         
                         st.success(f"✅ 比对完成！处理时间: {processing_time:.2f}秒")
@@ -460,7 +482,14 @@ def show_results_section():
     df_lookup = results['df_lookup']
     
     st.markdown("---")
-    st.header("📈 比对结果")
+    st.header(f"📈 比对结果")
+    
+    # 显示文件信息
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"📊 **数据表:** {results.get('data_filename', '未知文件')}")
+    with col2:
+        st.info(f"🔎 **查找表:** {results.get('lookup_filename', '未知文件')}")
     
     if st.session_state.result_timestamp:
         st.caption(f"⏰ 生成时间: {st.session_state.result_timestamp}")
@@ -480,10 +509,10 @@ def show_results_section():
     # 显示结果预览
     st.subheader("🔍 结果预览")
     
-    tab1, tab2 = st.tabs(["📋 查找表结果", "📊 数据表结果"])
+    tab1, tab2 = st.tabs([f"📋 {results.get('lookup_filename', '查找表')} - 匹配结果", f"📊 {results.get('data_filename', '数据表')} - 被匹配状态"])
     
     with tab1:
-        st.markdown("显示查找表的匹配结果（前100行）")
+        st.markdown(f"显示 **{results.get('lookup_filename', '查找表')}** 的匹配结果（前100行）")
         display_cols = ['匹配状态', '匹配行号', '匹配详情'] + list(df_lookup.columns)
         st.dataframe(
             result_lookup[display_cols].head(100), 
@@ -491,7 +520,7 @@ def show_results_section():
         )
     
     with tab2:
-        st.markdown("显示数据表的被匹配状态（前100行）")
+        st.markdown(f"显示 **{results.get('data_filename', '数据表')}** 的被匹配状态（前100行）")
         display_cols = list(df_data.columns) + ['被匹配状态', '被匹配次数']
         st.dataframe(
             result_data[display_cols].head(100), 
@@ -507,10 +536,15 @@ def show_results_section():
     
     with col1:
         if st.session_state.excel_data:
+            # 使用文件名生成下载文件名
+            data_name = results.get('data_filename', '数据表').split('.')[0]
+            lookup_name = results.get('lookup_filename', '查找表').split('.')[0]
+            timestamp = st.session_state.result_timestamp.replace(':', '-').replace(' ', '_') if st.session_state.result_timestamp else datetime.now().strftime('%Y%m%d_%H%M%S')
+            
             st.download_button(
                 label="📥 下载详细比对结果 (Excel)",
                 data=st.session_state.excel_data,
-                file_name=f"精确比对结果_{st.session_state.result_timestamp.replace(':', '-').replace(' ', '_')}.xlsx",
+                file_name=f"比对结果_{data_name}_vs_{lookup_name}_{timestamp}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True
@@ -520,7 +554,8 @@ def show_results_section():
                 with st.spinner("正在生成Excel文件..."):
                     excel_data = create_styled_excel(
                         result_data, result_lookup, 
-                        results['data_columns'], results['lookup_columns']
+                        results['data_columns'], results['lookup_columns'],
+                        results.get('data_filename', '数据表'), results.get('lookup_filename', '查找表')
                     )
                     st.session_state.excel_data = excel_data
                 st.rerun()
