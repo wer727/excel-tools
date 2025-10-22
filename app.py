@@ -1,591 +1,244 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import os
 from datetime import datetime
 from io import BytesIO
-import time
 
-# 页面配置
-st.set_page_config(
-    page_title="精确数据比对工具", 
-    page_icon="🔍", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-def process_file(uploaded_file):
-    """处理上传的文件，支持csv和excel格式"""
+def process_excel(df, merge_columns, count_column):
+    """处理Excel数据，合并重复数据并计数"""
     try:
-        file_type = uploaded_file.name.split('.')[-1].lower()
-        if file_type == 'csv':
-            return pd.read_csv(uploaded_file, encoding='utf-8')
-        elif file_type in ['xlsx', 'xls']:
-            return pd.read_excel(uploaded_file)
-        else:
-            st.error("❌ 不支持的文件格式，请上传CSV或Excel文件")
-            return None
-    except UnicodeDecodeError:
-        try:
-            # 尝试其他编码
-            return pd.read_csv(uploaded_file, encoding='gbk')
-        except:
-            st.error("❌ 文件编码错误，请检查文件格式")
-            return None
+        # 处理空值
+        for col in merge_columns:
+            df[col] = df[col].fillna('').astype(str)
+        
+        # 根据多列条件计算重复数据
+        df['_temp_key'] = df[merge_columns].apply(tuple, axis=1)
+        value_counts = df['_temp_key'].value_counts()
+        
+        # 创建新的DataFrame，去除重复项
+        df_unique = df.drop_duplicates(subset=merge_columns)
+        df_unique[count_column] = df_unique[merge_columns].apply(tuple, axis=1).map(value_counts)
+        
+        return df_unique.drop('_temp_key', axis=1)
     except Exception as e:
-        st.error(f"❌ 读取文件时发生错误: {str(e)}")
+        st.error(f"处理数据时发生错误: {str(e)}")
         return None
 
-def precise_row_comparison(df_data, df_lookup, data_columns, lookup_columns):
-    """
-    精确逐行比对：查找表的每一行去数据表中寻找完全匹配的行
-    """
+def compare_excel(df_data, df_lookup, data_columns, lookup_columns):
+    """比较两个DataFrame的差异"""
     try:
-        # 创建进度条
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # 为每对列进行匹配检查
+        results_data = []
+        results_lookup = []
         
-        status_text.text("正在预处理数据...")
+        # 创建数据副本以避免修改原始数据
+        df_data = df_data.copy()
+        df_lookup = df_lookup.copy()
         
-        # 数据预处理：处理NaN值和数据类型
-        df_data_clean = df_data[data_columns].copy()
-        df_lookup_clean = df_lookup[lookup_columns].copy()
-        
-        # 将NaN值替换为统一的标识符
-        df_data_clean = df_data_clean.fillna('__NULL__')
-        df_lookup_clean = df_lookup_clean.fillna('__NULL__')
-        
-        # 转换为字符串以确保精确匹配
-        for col in data_columns:
-            df_data_clean[col] = df_data_clean[col].astype(str).str.strip()
-        for col in lookup_columns:
-            df_lookup_clean[col] = df_lookup_clean[col].astype(str).str.strip()
-        
-        # 为结果添加新列
-        df_lookup_result = df_lookup.copy()
-        df_data_result = df_data.copy()
-        
-        # 初始化匹配结果列
-        df_lookup_result['匹配状态'] = '未匹配'
-        df_lookup_result['匹配行号'] = ''
-        df_lookup_result['匹配详情'] = ''
-        
-        df_data_result['被匹配状态'] = '未被匹配'
-        df_data_result['被匹配次数'] = 0
-        
-        # 统计信息
-        match_stats = {
-            '查找表总行数': len(df_lookup),
-            '数据表总行数': len(df_data),
-            '匹配成功行数': 0,
-            '未匹配行数': 0,
-            '重复匹配行数': 0
-        }
-        
-        matched_data_rows = set()  # 记录数据表中已匹配的行
-        
-        # 逐行进行精确匹配
-        total_rows = len(df_lookup_clean)
-        for lookup_idx in range(total_rows):
-            lookup_row = df_lookup_clean.iloc[lookup_idx]
+        for col_data, col_lookup in zip(data_columns, lookup_columns):
+            # 处理空值并转换为字符串
+            df_data[col_data] = df_data[col_data].fillna('').astype(str).str.strip()
+            df_lookup[col_lookup] = df_lookup[col_lookup].fillna('').astype(str).str.strip()
             
-            # 更新进度
-            progress = (lookup_idx + 1) / total_rows
-            progress_bar.progress(progress)
-            status_text.text(f"正在匹配第 {lookup_idx + 1}/{total_rows} 行...")
+            # 将数据和查找值转为集合
+            data_values = set(df_data[col_data].values)
+            lookup_values = set(df_lookup[col_lookup].values)
             
-            # 在数据表中查找匹配行
-            match_found = False
-            matched_rows = []
+            # 在数据表中标记结果
+            df_data[f"{col_data}_匹配结果"] = df_data[col_data].apply(
+                lambda x: "匹配" if x in lookup_values else ("缺失" if x == '' else "未匹配")
+            )
             
-            for data_idx in range(len(df_data_clean)):
-                data_row = df_data_clean.iloc[data_idx]
-                
-                # 逐列比较
-                all_columns_match = True
-                match_details = []
-                
-                for lookup_col, data_col in zip(lookup_columns, data_columns):
-                    lookup_val = lookup_row[lookup_col]
-                    data_val = data_row[data_col]
-                    
-                    if lookup_val == data_val:
-                        match_details.append(f"{lookup_col}={lookup_val}✓")
-                    else:
-                        match_details.append(f"{lookup_col}={lookup_val}≠{data_val}✗")
-                        all_columns_match = False
-                
-                # 如果所有列都匹配
-                if all_columns_match:
-                    match_found = True
-                    matched_rows.append(data_idx)
-                    matched_data_rows.add(data_idx)
-                    
-                    # 更新数据表匹配状态
-                    df_data_result.loc[data_idx, '被匹配状态'] = '已被匹配'
-                    df_data_result.loc[data_idx, '被匹配次数'] += 1
+            # 在查找值表中标记结果
+            df_lookup[f"{col_lookup}_匹配结果"] = df_lookup[col_lookup].apply(
+                lambda x: "匹配" if x in data_values else ("缺失" if x == '' else "未匹配")
+            )
             
-            # 更新查找表匹配结果
-            if match_found:
-                if len(matched_rows) == 1:
-                    df_lookup_result.loc[lookup_idx, '匹配状态'] = '匹配成功'
-                    df_lookup_result.loc[lookup_idx, '匹配行号'] = f"第{matched_rows[0]+1}行"
-                    match_stats['匹配成功行数'] += 1
-                else:
-                    df_lookup_result.loc[lookup_idx, '匹配状态'] = '重复匹配'
-                    df_lookup_result.loc[lookup_idx, '匹配行号'] = f"第{','.join([str(r+1) for r in matched_rows])}行"
-                    match_stats['重复匹配行数'] += 1
-                
-                # 记录匹配详情
-                sample_match_details = []
-                for lookup_col, data_col in zip(lookup_columns, data_columns):
-                    val = lookup_row[lookup_col]
-                    if val != '__NULL__':
-                        sample_match_details.append(f"{lookup_col}={val}")
-                df_lookup_result.loc[lookup_idx, '匹配详情'] = '; '.join(sample_match_details)
-            else:
-                df_lookup_result.loc[lookup_idx, '匹配状态'] = '未匹配'
-                match_stats['未匹配行数'] += 1
-                # 显示查找条件
-                search_details = []
-                for lookup_col in lookup_columns:
-                    val = lookup_row[lookup_col]
-                    if val != '__NULL__':
-                        search_details.append(f"{lookup_col}={val}")
-                df_lookup_result.loc[lookup_idx, '匹配详情'] = f"查找条件: {'; '.join(search_details)}"
+            # 统计结果
+            results_data.append(df_data[f"{col_data}_匹配结果"].value_counts())
+            results_lookup.append(df_lookup[f"{col_lookup}_匹配结果"].value_counts())
         
-        # 统计数据表中未被匹配的行数
-        unmatched_data_count = len(df_data) - len(matched_data_rows)
-        match_stats['数据表未被匹配行数'] = unmatched_data_count
-        
-        # 清除进度条
-        progress_bar.empty()
-        status_text.empty()
-        
-        return df_data_result, df_lookup_result, match_stats
-        
+        return df_data, df_lookup, results_data, results_lookup
     except Exception as e:
-        st.error(f"❌ 比对数据时发生错误: {str(e)}")
-        return None, None, None
+        st.error(f"比对数据时发生错误: {str(e)}")
+        return None, None, None, None
 
-def create_styled_excel(df_data_result, df_lookup_result, data_columns, lookup_columns, data_filename="数据表", lookup_filename="查找表"):
-    """创建带样式的Excel文件"""
-    output = BytesIO()
-    
+def apply_excel_styles(writer, df, sheet_name, columns_to_check):
+    """应用Excel样式"""
     try:
-        # 处理工作表名称，移除文件扩展名
-        data_sheet_name = f"{data_filename.split('.')[0]}_结果"[:31]  # Excel工作表名称限制31字符
-        lookup_sheet_name = f"{lookup_filename.split('.')[0]}_结果"[:31]
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
         
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            # 写入数据，使用文件名作为工作表名
-            df_data_result.to_excel(writer, sheet_name=data_sheet_name, index=False)
-            df_lookup_result.to_excel(writer, sheet_name=lookup_sheet_name, index=False)
-            
-            # 获取工作簿和工作表对象
-            workbook = writer.book
-            worksheet_data = writer.sheets[data_sheet_name]
-            worksheet_lookup = writer.sheets[lookup_sheet_name]
-            
-            # 定义格式
-            red_format = workbook.add_format({'bg_color': '#FFE6E6', 'font_color': '#CC0000'})
-            green_format = workbook.add_format({'bg_color': '#E6F7E6', 'font_color': '#006600'})
-            yellow_format = workbook.add_format({'bg_color': '#FFF2CC', 'font_color': '#CC6600'})
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3'})
-            
-            # 设置列宽
-            for worksheet in [worksheet_data, worksheet_lookup]:
-                worksheet.set_column(0, 50, 12)
-            
-            # 为查找表结果添加条件格式
-            for row in range(1, len(df_lookup_result) + 1):
-                status_value = df_lookup_result.iloc[row-1]['匹配状态']
+        # 定义样式
+        red_format = workbook.add_format({
+            'font_color': 'red',
+            'font_name': '微软雅黑',
+            'align': 'left',
+            'valign': 'vcenter'
+        })
+        
+        normal_format = workbook.add_format({
+            'font_name': '微软雅黑',
+            'align': 'left',
+            'valign': 'vcenter'
+        })
+        
+        # 设置列宽
+        for idx, col in enumerate(df.columns):
+            max_length = max(
+                df[col].astype(str).apply(len).max(),
+                len(str(col))
+            )
+            worksheet.set_column(idx, idx, max_length + 2)
+        
+        # 获取列的索引位置并应用样式
+        for col_name in columns_to_check:
+            if col_name in df.columns:  # 确保列存在
+                col_idx = df.columns.get_loc(col_name)
+                result_col = f"{col_name}_匹配结果"
                 
-                if status_value == '匹配成功':
-                    worksheet_lookup.set_row(row, None, green_format)
-                elif status_value == '重复匹配':
-                    worksheet_lookup.set_row(row, None, yellow_format)
-                elif status_value == '未匹配':
-                    worksheet_lookup.set_row(row, None, red_format)
-            
-            # 为数据表结果添加条件格式
-            for row in range(1, len(df_data_result) + 1):
-                status_value = df_data_result.iloc[row-1]['被匹配状态']
-                
-                if status_value == '已被匹配':
-                    worksheet_data.set_row(row, None, green_format)
-                else:
-                    worksheet_data.set_row(row, None, red_format)
-        
-        output.seek(0)
-        return output.getvalue()
-        
+                if result_col in df.columns:  # 确保结果列存在
+                    # 为每一行应用条件格式
+                    for row_idx in range(len(df)):
+                        cell_value = str(df.iloc[row_idx][col_name])
+                        match_result = df.iloc[row_idx][result_col]
+                        
+                        if match_result == "未匹配":
+                            worksheet.write(row_idx + 1, col_idx, cell_value, red_format)
+                        else:
+                            worksheet.write(row_idx + 1, col_idx, cell_value, normal_format)
     except Exception as e:
-        st.error(f"❌ 创建Excel文件时发生错误: {str(e)}")
-        return None
-
-def display_stats_cards(stats):
-    """显示统计卡片"""
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="📊 查找表总行数", 
-            value=stats['查找表总行数']
-        )
-    
-    with col2:
-        success_rate = stats['匹配成功行数'] / stats['查找表总行数'] * 100 if stats['查找表总行数'] > 0 else 0
-        st.metric(
-            label="✅ 匹配成功", 
-            value=stats['匹配成功行数'],
-            delta=f"{success_rate:.1f}%"
-        )
-    
-    with col3:
-        fail_rate = stats['未匹配行数'] / stats['查找表总行数'] * 100 if stats['查找表总行数'] > 0 else 0
-        st.metric(
-            label="❌ 未匹配", 
-            value=stats['未匹配行数'],
-            delta=f"{fail_rate:.1f}%"
-        )
-    
-    with col4:
-        st.metric(
-            label="🔄 重复匹配", 
-            value=stats['重复匹配行数']
-        )
+        st.error(f"应用Excel样式时发生错误: {str(e)}")
 
 def main():
-    # 初始化session state
-    if 'comparison_results' not in st.session_state:
-        st.session_state.comparison_results = None
-    if 'comparison_stats' not in st.session_state:
-        st.session_state.comparison_stats = None
-    if 'excel_data' not in st.session_state:
-        st.session_state.excel_data = None
-    if 'result_timestamp' not in st.session_state:
-        st.session_state.result_timestamp = None
-    if 'show_comparison_section' not in st.session_state:
-        st.session_state.show_comparison_section = True
-    if 'file_names' not in st.session_state:
-        st.session_state.file_names = {'data_file': '', 'lookup_file': ''}
+    st.set_page_config(page_title="Excel工具", page_icon="📊", layout="wide")
+    st.title("Excel文件处理工具")
     
-    # 页面标题
-    st.title("🔍 精确数据比对工具")
-    st.markdown("---")
+    # 侧边栏 - 功能选择
+    function = st.sidebar.radio(
+        "选择功能",
+        ["合并重复数据", "表格数据匹配", "表格数据填充"]
+    )
     
-    # 侧边栏说明和控制
-    with st.sidebar:
-        st.header("📖 使用说明")
-        st.markdown("""
-        ### 功能特性
-        - 🎯 **精确逐行匹配**：查找表的每一行数据在数据表中寻找完全匹配的行
-        - 🔗 **多列组合匹配**：支持选择多个列进行组合匹配
-        - 📊 **详细匹配报告**：显示匹配状态、匹配行号和详细信息
-        - 📁 **Excel导出**：带颜色标识的结果文件
+    if function == "合并重复数据":
+        st.header("合并重复数据")
         
-        ### 使用步骤
-        1. 上传数据表（被查找的表格）
-        2. 上传查找表（包含查找条件的表格）
-        3. 选择对应的比较列
-        4. 点击开始比对
-        5. 查看结果并下载报告
+        # 文件上传
+        uploaded_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'])
         
-        ### 文件要求
-        - 支持格式：CSV、Excel (.xlsx/.xls)
-        - 最大文件大小：200MB
-        - 编码支持：UTF-8、GBK
-        """)
-        
-        # 控制按钮
-        st.markdown("---")
-        st.header("🎛️ 操作控制")
-        
-        if st.button("🔄 重新开始", use_container_width=True):
-            # 清除所有session state
-            for key in ['comparison_results', 'comparison_stats', 'excel_data', 'result_timestamp', 'file_names']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.session_state.show_comparison_section = True
-            st.session_state.file_names = {'data_file': '', 'lookup_file': ''}
-            st.rerun()
-        
-        # 显示结果状态
-        if st.session_state.comparison_results is not None:
-            st.success("✅ 有可用的比对结果")
-            if st.session_state.result_timestamp:
-                st.info(f"⏰ 生成时间: {st.session_state.result_timestamp}")
+        if uploaded_file:
+            # 读取Excel文件
+            df = pd.read_excel(uploaded_file)
             
-            # 显示文件名
-            if st.session_state.file_names['data_file'] and st.session_state.file_names['lookup_file']:
-                st.markdown("📁 **文件信息:**")
-                st.markdown(f"- 数据表: `{st.session_state.file_names['data_file']}`")
-                st.markdown(f"- 查找表: `{st.session_state.file_names['lookup_file']}`")
-            
-            if st.button("📋 查看结果详情", use_container_width=True):
-                st.session_state.show_comparison_section = False
-                st.rerun()
-            
-            if st.button("📁 跳转到下载", use_container_width=True):
-                st.session_state.show_comparison_section = False
-                # 滚动到页面底部的下载按钮
-                st.markdown('<script>window.scrollTo(0, document.body.scrollHeight);</script>', unsafe_allow_html=True)
-                st.rerun()
-    
-    # 如果有结果且不显示比对区域，直接跳到结果展示
-    if st.session_state.comparison_results is not None and not st.session_state.show_comparison_section:
-        show_results_section()
-        return
-    
-    # 文件上传区域
-    st.subheader("📁 文件上传")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("##### 📋 数据表（被查找表）")
-        uploaded_file_data = st.file_uploader(
-            "选择数据表文件", 
-            type=['csv', 'xlsx', 'xls'],
-            help="这是被查找的主数据表",
-            key="data_file"
-        )
-    
-    with col2:
-        st.markdown("##### 🔎 查找表（查找条件表）")
-        uploaded_file_lookup = st.file_uploader(
-            "选择查找表文件", 
-            type=['csv', 'xlsx', 'xls'],
-            help="这是包含查找条件的表格",
-            key="lookup_file"
-        )
-
-    if uploaded_file_data and uploaded_file_lookup:
-        # 保存文件名到session state
-        st.session_state.file_names['data_file'] = uploaded_file_data.name
-        st.session_state.file_names['lookup_file'] = uploaded_file_lookup.name
-        
-        # 读取文件
-        with st.spinner("正在读取文件..."):
-            df_data = process_file(uploaded_file_data)
-            df_lookup = process_file(uploaded_file_lookup)
-
-        if df_data is not None and df_lookup is not None:
             # 显示数据预览
-            st.markdown("---")
-            st.subheader("📊 数据预览")
+            st.subheader("数据预览")
+            st.dataframe(df.head())
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**📊 {st.session_state.file_names['data_file']}** (共{len(df_data):,}行)")
-                st.dataframe(df_data.head(), use_container_width=True)
-                
-            with col2:
-                st.markdown(f"**🔎 {st.session_state.file_names['lookup_file']}** (共{len(df_lookup):,}行)")
-                st.dataframe(df_lookup.head(), use_container_width=True)
-
-            # 列选择区域
-            st.markdown("---")
-            st.subheader("🎯 选择比较列")
+            # 选择列
+            columns = df.columns.tolist()
+            merge_cols = st.multiselect("选择用于判断重复的列", columns)
+            count_col = st.selectbox("选择计数结果写入的列", columns)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"##### 📊 {st.session_state.file_names['data_file']} - 选择列")
-                data_columns = st.multiselect(
-                    "选择数据表中用于匹配的列", 
-                    df_data.columns,
-                    help="选择数据表中用于匹配的列，可以选择多个列进行组合匹配"
-                )
-                
-            with col2:
-                st.markdown(f"##### 🔎 {st.session_state.file_names['lookup_file']} - 选择列")
-                lookup_columns = st.multiselect(
-                    "选择查找表的查找条件列", 
-                    df_lookup.columns,
-                    help="选择查找表中的查找条件列，必须与数据表选择的列数量相同"
-                )
-
-            # 显示匹配关系
-            if data_columns and lookup_columns:
-                st.info("🔗 **列匹配关系预览：**")
-                if len(data_columns) == len(lookup_columns):
-                    match_info = []
-                    for i, (d_col, l_col) in enumerate(zip(data_columns, lookup_columns), 1):
-                        match_info.append(f"{i}. 数据表[{d_col}] ↔ 查找表[{l_col}]")
-                    st.success("\n".join(match_info))
+            if st.button("处理数据"):
+                if not merge_cols:
+                    st.warning("请选择用于判断重复的列")
                 else:
-                    st.error(f"❌ 列数量不匹配！数据表选择了{len(data_columns)}列，查找表选择了{len(lookup_columns)}列")
-
-            # 比对按钮和结果
-            st.markdown("---")
-            if st.button("🚀 开始精确比对", type="primary", use_container_width=True):
+                    result_df = process_excel(df, merge_cols, count_col)
+                    if result_df is not None:
+                        st.success("处理完成！")
+                        
+                        # 显示结果
+                        st.subheader("处理结果")
+                        st.dataframe(result_df)
+                        
+                        # 下载结果
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            result_df.to_excel(writer, index=False)
+                        
+                        st.download_button(
+                            label="下载结果",
+                            data=output.getvalue(),
+                            file_name=f"合并结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+    
+    elif function == "表格数据匹配":
+        st.header("表格数据匹配")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            data_file = st.file_uploader("上传数据表", type=['xlsx', 'xls'])
+        with col2:
+            lookup_file = st.file_uploader("上传查找值表", type=['xlsx', 'xls'])
+            
+        if data_file and lookup_file:
+            # 读取文件
+            df_data = pd.read_excel(data_file)
+            df_lookup = pd.read_excel(lookup_file)
+            
+            # 显示数据预览
+            st.subheader("数据表预览")
+            st.dataframe(df_data.head())
+            st.subheader("查找值表预览")
+            st.dataframe(df_lookup.head())
+            
+            # 选择要比对的列
+            data_columns = st.multiselect("选择数据表要比对的列", df_data.columns)
+            lookup_columns = st.multiselect("选择查找值表对应的列", df_lookup.columns)
+            
+            if st.button("开始比对"):
                 if len(data_columns) != len(lookup_columns):
-                    st.error("❌ 两个表格选择的列数必须相同！")
-                elif not data_columns or not lookup_columns:
-                    st.error("❌ 请至少选择一列进行比较！")
+                    st.warning("两个表格选择的列数必须相同")
                 else:
-                    # 执行比对
-                    start_time = time.time()
-                    
-                    result_data, result_lookup, stats = precise_row_comparison(
+                    result_data, result_lookup, stats_data, stats_lookup = compare_excel(
                         df_data, df_lookup, data_columns, lookup_columns
                     )
                     
                     if result_data is not None:
-                        processing_time = time.time() - start_time
+                        st.success("比对完成！")
                         
-                        # 保存结果到session state
-                        st.session_state.comparison_results = {
-                            'result_data': result_data,
-                            'result_lookup': result_lookup,
-                            'df_data': df_data,
-                            'df_lookup': df_lookup,
-                            'data_columns': data_columns,
-                            'lookup_columns': lookup_columns,
-                            'data_filename': st.session_state.file_names['data_file'],
-                            'lookup_filename': st.session_state.file_names['lookup_file']
-                        }
-                        st.session_state.comparison_stats = stats
-                        st.session_state.result_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        # 显示统计结果
+                        st.subheader("比对结果统计")
+                        col1, col2 = st.columns(2)
                         
-                        # 生成Excel并保存到session state
-                        with st.spinner("正在生成Excel文件..."):
-                            excel_data = create_styled_excel(
-                                result_data, result_lookup, data_columns, lookup_columns,
-                                st.session_state.file_names['data_file'], st.session_state.file_names['lookup_file']
+                        with col1:
+                            st.write("数据表统计")
+                            for col, stats in zip(data_columns, stats_data):
+                                st.write(f"{col}列统计:")
+                                st.write(stats)
+                                
+                        with col2:
+                            st.write("查找值表统计")
+                            for col, stats in zip(lookup_columns, stats_lookup):
+                                st.write(f"{col}列统计:")
+                                st.write(stats)
+                        
+                        # 下载结果
+                        output = BytesIO()
+                        try:
+                            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                                # 写入数据
+                                result_data.to_excel(writer, sheet_name='数据表对比结果', index=False)
+                                result_lookup.to_excel(writer, sheet_name='查找值表对比结果', index=False)
+                                
+                                # 应用样式
+                                apply_excel_styles(writer, result_data, '数据表对比结果', data_columns)
+                                apply_excel_styles(writer, result_lookup, '查找值表对比结果', lookup_columns)
+                            
+                            st.download_button(
+                                label="下载比对结果",
+                                data=output.getvalue(),
+                                file_name=f"对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
-                            st.session_state.excel_data = excel_data
-                        
-                        st.success(f"✅ 比对完成！处理时间: {processing_time:.2f}秒")
-                        st.info("💡 结果已保存，您可以随时查看和下载，页面刷新不会丢失！")
-                        
-                        # 自动跳转到结果展示
-                        st.session_state.show_comparison_section = False
-                        time.sleep(1)  # 给用户一点时间看到成功消息
-                        st.rerun()
+                        except Exception as e:
+                            st.error(f"生成Excel文件时发生错误: {str(e)}")
 
-    # 如果有保存的结果，显示结果区域
-    if st.session_state.comparison_results is not None:
-        show_results_section()
-
-def show_results_section():
-    """显示结果区域"""
-    if st.session_state.comparison_results is None:
-        return
-    
-    results = st.session_state.comparison_results
-    stats = st.session_state.comparison_stats
-    
-    result_data = results['result_data']
-    result_lookup = results['result_lookup']
-    df_data = results['df_data']
-    df_lookup = results['df_lookup']
-    
-    st.markdown("---")
-    st.header(f"📈 比对结果")
-    
-    # 显示文件信息
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info(f"📊 **数据表:** {results.get('data_filename', '未知文件')}")
-    with col2:
-        st.info(f"🔎 **查找表:** {results.get('lookup_filename', '未知文件')}")
-    
-    if st.session_state.result_timestamp:
-        st.caption(f"⏰ 生成时间: {st.session_state.result_timestamp}")
-    
-    # 显示统计结果
-    st.subheader("📊 统计概览")
-    display_stats_cards(stats)
-    
-    # 详细统计表
-    with st.expander("📋 查看详细统计", expanded=False):
-        stats_df = pd.DataFrame([
-            {"项目": k, "数量": v, "占比": f"{v/stats['查找表总行数']*100:.2f}%" if '行数' in k and stats['查找表总行数'] > 0 else "-"}
-            for k, v in stats.items()
-        ])
-        st.dataframe(stats_df, use_container_width=True)
-    
-    # 显示结果预览
-    st.subheader("🔍 结果预览")
-    
-    tab1, tab2 = st.tabs([f"📋 {results.get('lookup_filename', '查找表')} - 匹配结果", f"📊 {results.get('data_filename', '数据表')} - 被匹配状态"])
-    
-    with tab1:
-        st.markdown(f"显示 **{results.get('lookup_filename', '查找表')}** 的匹配结果（前100行）")
-        display_cols = ['匹配状态', '匹配行号', '匹配详情'] + list(df_lookup.columns)
-        st.dataframe(
-            result_lookup[display_cols].head(100), 
-            use_container_width=True
-        )
-    
-    with tab2:
-        st.markdown(f"显示 **{results.get('data_filename', '数据表')}** 的被匹配状态（前100行）")
-        display_cols = list(df_data.columns) + ['被匹配状态', '被匹配次数']
-        st.dataframe(
-            result_data[display_cols].head(100), 
-            use_container_width=True
-        )
-    
-    # 下载区域
-    st.markdown("---")
-    st.subheader("📥 下载完整结果")
-    
-    # 创建两列布局
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        if st.session_state.excel_data:
-            # 使用文件名生成下载文件名
-            data_name = results.get('data_filename', '数据表').split('.')[0]
-            lookup_name = results.get('lookup_filename', '查找表').split('.')[0]
-            timestamp = st.session_state.result_timestamp.replace(':', '-').replace(' ', '_') if st.session_state.result_timestamp else datetime.now().strftime('%Y%m%d_%H%M%S')
-            
-            st.download_button(
-                label="📥 下载详细比对结果 (Excel)",
-                data=st.session_state.excel_data,
-                file_name=f"比对结果_{data_name}_vs_{lookup_name}_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-        else:
-            if st.button("🔄 重新生成Excel文件", use_container_width=True):
-                with st.spinner("正在生成Excel文件..."):
-                    excel_data = create_styled_excel(
-                        result_data, result_lookup, 
-                        results['data_columns'], results['lookup_columns'],
-                        results.get('data_filename', '数据表'), results.get('lookup_filename', '查找表')
-                    )
-                    st.session_state.excel_data = excel_data
-                st.rerun()
-    
-    with col2:
-        st.info("""
-        📋 **Excel文件说明：**
-        - 🟢 绿色：匹配成功
-        - 🟡 黄色：重复匹配  
-        - 🔴 红色：未匹配
-        """)
-    
-    # 下载状态提示
-    st.success("✅ 点击下载按钮不会刷新页面，结果已保存！")
-    
-    # 返回比对区域的按钮
-    if st.button("🔄 进行新的比对", use_container_width=True):
-        st.session_state.show_comparison_section = True
-        st.rerun()
-    
-    # 底部信息
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style='text-align: center; color: #666; padding: 20px;'>
-            <p>🔍 精确数据比对工具 | 支持大数据量处理 | 精确逐行匹配</p>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+    elif function == "表格数据填充":
+        st.header("表格数据填充")
+        st.info("此功能正在开发中...")
 
 if __name__ == "__main__":
-    main()
+    main() 
